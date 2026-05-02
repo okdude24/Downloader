@@ -1,99 +1,262 @@
-name: '📦 دانلود و ذخیره در مخزن'
+name: '📸 اسکرین‌شات از وب‌سایت مثل مرورگر واقعی'
 
 on:
   workflow_dispatch:
     inputs:
-      file_url:
-        description: '🔗 لینک مستقیم فایل'
+      website_url:
+        description: '🌐 آدرس کامل وب‌سایت (با http:// یا https://)'
         required: true
         type: string
-      password:
-        description: '🔐 رمز فایل فشرده (اختیاری)'
+      viewport_width:
+        description: '📏 عرض صفحه (پیکسل)'
+        required: false
+        type: string
+        default: '1280'
+      viewport_height:
+        description: '📐 ارتفاع صفحه (پیکسل)'
+        required: false
+        type: string
+        default: '800'
+      full_page:
+        description: '🗂️ اسکرین‌شات تمام‌صفحه'
+        required: false
+        type: boolean
+        default: true
+      format:
+        description: '🖼️ فرمت تصویر خروجی'
+        required: false
+        type: choice
+        default: 'png'
+        options:
+          - png
+          - jpeg
+          - webp
+      quality:
+        description: '🎚️ کیفیت تصویر (فقط برای jpeg و webp)'
+        required: false
+        type: string
+        default: '90'
+      delay:
+        description: '⏳ تاخیر اضافی قبل از اسکرین‌شات (ثانیه)'
+        required: false
+        type: string
+        default: '3'
+      output_name:
+        description: '📁 نام پوشه/فایل (اختیاری)'
         required: false
         type: string
         default: ''
-      split_size:
-        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
+      cookies_secret:
+        description: '🍪 نام Secret حاوی کوکی‌ها (اختیاری)'
         required: false
         type: string
-        default: '95m'
+        default: ''
+      use_headful_mode:
+        description: '🖥️ اجرای مرورگر در حالت Headful (شبیه‌سازی کامل با نمایش مجازی)'
+        required: false
+        type: boolean
+        default: true
+      user_agent:
+        description: '🕶️ User-Agent سفارشی (خالی = پیش‌فرض کروم ویندوز)'
+        required: false
+        type: string
+        default: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
 
 permissions:
-  contents: write  # مهم: اجازه پوش به مخزن
+  contents: write
 
 jobs:
-  download-and-commit:
+  screenshot-and-commit:
     runs-on: ubuntu-latest
+
     steps:
       - name: 🔄 دریافت کد مخزن
         uses: actions/checkout@v4
 
-      - name: ⚙️ نصب ابزارها
+      - name: ⚙️ نصب Node.js و Playwright
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 🎭 نصب Playwright و Chromium
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: 🖥️ نصب Xvfb (در صورت نیاز به حالت Headful)
+        if: ${{ github.event.inputs.use_headful_mode == 'true' }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full file
+          sudo apt-get install -y xvfb
 
-      - name: 📥 دانلود فایل
-        id: download
+      - name: 🍪 بارگذاری کوکی (در صورت وجود)
         run: |
-          URL="${{ github.event.inputs.file_url }}"
-          echo "در حال دانلود از: $URL"
-          curl -L --fail --retry 5 --retry-delay 5 --progress-bar -o downloaded_file "$URL"
-          if [ $? -ne 0 ]; then exit 1; fi
-          ls -lh downloaded_file
-
-      - name: 🧠 تشخیص نوع و استخراج نام اصلی
-        id: classify
-        run: |
-          # نام اصلی از لینک
-          RAW_NAME=$(basename "${{ github.event.inputs.file_url }}" | sed 's/\?.*//' | sed 's/%20/ /g')
-          if [ -z "$RAW_NAME" ]; then RAW_NAME="unknown_file"; fi
-          # حذف کاراکترهای غیرمجاز برای نام پوشه (جایگزینی با _)
-          SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[\\/:*?"<>|]/_/g')
-          # تشخیص MIME
-          MIME=$(file -b --mime-type downloaded_file)
-          EXT="${RAW_NAME##*.}"
-          EXT=$(echo "$EXT" | tr '[:upper:]' '[:lower:]')
-          
-          if [[ "$MIME" == video/* ]] || [[ "$EXT" =~ ^(mp4|mkv|avi|mov|wmv|flv|webm)$ ]]; then
-            CAT="video"
-          elif [[ "$MIME" == audio/* ]] || [[ "$EXT" =~ ^(mp3|wav|ogg|flac|m4a)$ ]]; then
-            CAT="audio"
-          elif [[ "$MIME" == image/* ]] || [[ "$EXT" =~ ^(jpg|jpeg|png|gif|bmp|webp)$ ]]; then
-            CAT="image"
-          elif [[ "$MIME" == application/pdf ]] || [[ "$EXT" =~ ^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt)$ ]]; then
-            CAT="document"
+          COOKIE_SECRET="${{ github.event.inputs.cookies_secret }}"
+          if [ -n "$COOKIE_SECRET" ]; then
+            echo "${{ secrets[github.event.inputs.cookies_secret] }}" > cookies.json
+            echo "COOKIE_FILE=cookies.json" >> $GITHUB_ENV
+            echo "✅ کوکی‌ها از Secret بارگذاری شدند"
           else
-            CAT="other"
+            echo "COOKIE_FILE=" >> $GITHUB_ENV
+            echo "⚠️ کوکی تنظیم نشده"
           fi
-          
-          echo "CAT=$CAT" >> $GITHUB_ENV
-          echo "SAFE_NAME=$SAFE_NAME" >> $GITHUB_ENV
-          echo "✅ دسته: $CAT → زیرپوشه: $SAFE_NAME"
 
-      - name: 🗜️ فشرده‌سازی و تقسیم (با اعمال رمز)
+      - name: 📥 گرفتن اسکرین‌شات با Playwright (شبیه‌سازی مرورگر واقعی)
         run: |
-          # پوشه نهایی: downloads/دسته/نام فایل/
-          FINAL_DIR="downloads/${{ env.CAT }}/${{ env.SAFE_NAME }}"
-          mkdir -p "$FINAL_DIR"
-          
-          # حذف فایل‌های قبلی در آن زیرپوشه (در صورت وجود) تا تداخل پیش نیاید
-          rm -f "$FINAL_DIR"/*.7z*
-          
-          # فشرده‌سازی
-          if [ -z "${{ github.event.inputs.password }}" ]; then
-            7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./downloaded_file"
+          WEBSITE_URL="${{ github.event.inputs.website_url }}"
+          FORMAT="${{ github.event.inputs.format }}"
+          QUALITY="${{ github.event.inputs.quality }}"
+          DELAY="${{ github.event.inputs.delay }}"
+          WIDTH="${{ github.event.inputs.viewport_width }}"
+          HEIGHT="${{ github.event.inputs.viewport_height }}"
+          FULL_PAGE="${{ github.event.inputs.full_page }}"
+          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
+          HEADFUL="${{ github.event.inputs.use_headful_mode }}"
+          USER_AGENT="${{ github.event.inputs.user_agent }}"
+          COOKIE_FILE="${{ env.COOKIE_FILE }}"
+
+          # ساخت نام پوشه مقصد
+          if [ -z "$OUTPUT_NAME" ]; then
+            DOMAIN=$(echo "$WEBSITE_URL" | awk -F/ '{print $3}' | sed 's/[^a-zA-Z0-9._-]/_/g')
+            FOLDER_NAME="$DOMAIN-$(date +%Y%m%d-%H%M%S)"
           else
-            7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" "./downloaded_file"
+            FOLDER_NAME="$OUTPUT_NAME"
           fi
-          
-          echo "✅ فایل در $FINAL_DIR ذخیره شد"
-          ls -lh "$FINAL_DIR"
+
+          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
+          mkdir -p "screenshots/$FOLDER_NAME"
+
+          # اجرای Xvfb در پس‌زمینه اگر حالت headful فعال باشد
+          if [ "$HEADFUL" = "true" ]; then
+            export DISPLAY=:99
+            Xvfb :99 -screen 0 1920x1080x24 &
+            sleep 2
+            echo "🖥️ نمایش مجازی (Xvfb) راه‌اندازی شد"
+          fi
+
+          # ذخیره اسکریپت Node.js
+          cat > screenshot.js << 'EOFSCRIPT'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+
+          const WIDTH = parseInt(process.env.SCREEN_WIDTH);
+          const HEIGHT = parseInt(process.env.SCREEN_HEIGHT);
+          const URL = process.env.WEBSITE_URL;
+          const FORMAT = process.env.FORMAT;
+          const QUALITY = parseInt(process.env.QUALITY);
+          const DELAY = parseInt(process.env.DELAY);
+          const FULL_PAGE = process.env.FULL_PAGE === 'true';
+          const HEADFUL = process.env.HEADFUL === 'true';
+          const USER_AGENT = process.env.USER_AGENT;
+          const COOKIE_FILE = process.env.COOKIE_FILE;
+          const SCREENSHOT_PATH = process.env.SCREENSHOT_PATH;
+
+          (async () => {
+            const launchOptions = {
+              headless: !HEADFUL,   // headful وقتی false باشه headless
+              args: HEADFUL ? [] : ['--no-sandbox']
+            };
+            const browser = await chromium.launch(launchOptions);
+
+            const contextOptions = {
+              viewport: { width: WIDTH, height: HEIGHT }
+            };
+            if (USER_AGENT) {
+              contextOptions.userAgent = USER_AGENT;
+            }
+            const context = await browser.newContext(contextOptions);
+            const page = await context.newPage();
+
+            // بارگذاری کوکی‌ها در صورت وجود
+            if (COOKIE_FILE) {
+              try {
+                const cookies = JSON.parse(fs.readFileSync(COOKIE_FILE, 'utf-8'));
+                await context.addCookies(cookies);
+                console.log('🍪 کوکی‌ها بارگذاری شدند');
+              } catch (e) {
+                console.log('❌ خطا در بارگذاری کوکی‌ها:', e.message);
+              }
+            }
+
+            console.log(`🌐 در حال بارگذاری: ${URL}`);
+            await page.goto(URL, { waitUntil: 'networkidle', timeout: 60000 });
+            console.log('✅ صفحه اولیه لود شد');
+
+            // تاخیر سفارشی کاربر
+            if (DELAY > 0) {
+              console.log(`⏳ ${DELAY} ثانیه صبر اضافی...`);
+              await page.waitForTimeout(DELAY * 1000);
+            }
+
+            // اسکرول به پایین و بالا برای بارگذاری محتواهای تنبل
+            console.log('📜 اسکرول خودکار صفحه...');
+            await page.evaluate(async () => {
+              await new Promise(resolve => {
+                let totalHeight = 0;
+                const distance = 300;
+                const timer = setInterval(() => {
+                  const scrollHeight = document.body.scrollHeight;
+                  window.scrollBy(0, distance);
+                  totalHeight += distance;
+                  if (totalHeight >= scrollHeight) {
+                    clearInterval(timer);
+                    resolve();
+                  }
+                }, 100);
+              });
+            });
+            // صبر کوتاه برای بارگذاری تصاویر جدید
+            await page.waitForTimeout(2000);
+            // برگشت به بالای صفحه
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await page.waitForTimeout(500);
+            console.log('✅ اسکرول کامل شد');
+
+            const screenshotOptions = {
+              path: SCREENSHOT_PATH,
+              type: FORMAT,
+              fullPage: FULL_PAGE
+            };
+            if (FORMAT === 'jpeg' || FORMAT === 'webp') {
+              screenshotOptions.quality = QUALITY;
+            }
+
+            await page.screenshot(screenshotOptions);
+            console.log('📸 اسکرین‌شات ذخیره شد');
+            await browser.close();
+          })();
+          EOFSCRIPT
+
+          # تنظیم متغیرهای محیطی برای اسکریپت
+          export SCREEN_WIDTH="$WIDTH"
+          export SCREEN_HEIGHT="$HEIGHT"
+          export WEBSITE_URL="$WEBSITE_URL"
+          export FORMAT="$FORMAT"
+          export QUALITY="$QUALITY"
+          export DELAY="$DELAY"
+          export FULL_PAGE="$FULL_PAGE"
+          export HEADFUL="$HEADFUL"
+          export USER_AGENT="$USER_AGENT"
+          export COOKIE_FILE="$COOKIE_FILE"
+          export SCREENSHOT_PATH="screenshots/$FOLDER_NAME/screenshot.$FORMAT"
+
+          node screenshot.js
+
+          # پاک‌سازی Xvfb اگر فعال بود
+          if [ "$HEADFUL" = "true" ]; then
+            pkill Xvfb || true
+          fi
+
+      - name: 🧹 پاکسازی فایل‌های موقت
+        run: |
+          rm -f cookies.json screenshot.js package.json package-lock.json
+          rm -rf node_modules
 
       - name: 📝 کامیت و پوش به مخزن
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/
-          git commit -m "Add downloaded file: ${{ env.SAFE_NAME }} (category: ${{ env.CAT }})" || echo "Nothing to commit"
+          git add screenshots/
+          git commit -m "📸 Add screenshot of ${{ github.event.inputs.website_url }} → screenshots/${{ env.FOLDER_NAME }}" || echo "Nothing to commit"
           git push

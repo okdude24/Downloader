@@ -1,31 +1,45 @@
-name: '🎬 دانلود ویدیو یوتیوب و ذخیره در مخزن'
+name: '🎬 دانلود ویدیو از یوتیوب'
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: '🔗 لینک ویدیو یوتیوب'
+        description: '🔗 لینک کامل ویدیو یا Short یوتیوب'
         required: true
         type: string
+      format:
+        description: '🎞️ فرمت خروجی'
+        required: false
+        type: choice
+        default: 'mp4'
+        options:
+          - mp4
+          - webm
+          - mkv
+          - mp3 (فقط صوت)
       quality:
-        description: '🎞️ کیفیت ویدیو'
+        description: '📊 کیفیت (Best = بهترین موجود)'
         required: false
         type: choice
         default: 'best'
         options:
           - best
-          - 1080p
-          - 720p
-          - 480p
-          - 360p
-          - audio-only
-      split_size:
-        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
+          - '1080p'
+          - '720p'
+          - '480p'
+          - '360p'
+      output_name:
+        description: '📁 نام پوشه مقصد (اختیاری)'
         required: false
         type: string
-        default: '95m'
-      password:
-        description: '🔐 رمز فایل فشرده (اختیاری)'
+        default: ''
+      cookies_secret:
+        description: '🍪 نام Secret حاوی کوکی‌ها (اختیاری)'
+        required: false
+        type: string
+        default: ''
+      extra_options:
+        description: '⚙️ گزینه‌های اضافی yt-dlp (مثلاً --write-thumbnail)'
         required: false
         type: string
         default: ''
@@ -41,153 +55,109 @@ jobs:
       - name: 🔄 دریافت کد مخزن
         uses: actions/checkout@v4
 
-      - name: ⚙️ نصب ابزارها
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y p7zip-full ffmpeg
-          # نصب آخرین نسخه yt-dlp مستقیم از GitHub (پایدارتر از pip)
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-          yt-dlp --version
-          # تأیید وجود Node.js (runtime برای یوتیوب)
-          node --version
+      - name: 🐍 نصب Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      - name: 🍪 بارگذاری کوکی از Secret
+      - name: 📥 نصب yt-dlp
+        run: pip install yt-dlp
+
+      - name: 🍪 بارگذاری کوکی (در صورت وجود)
         run: |
-          # اگر Secret با نام YT_COOKIES تنظیم شده باشد، در فایل موقت ذخیره می‌شود
-          if [ -n "${{ secrets.YT_COOKIES }}" ]; then
-            echo "${{ secrets.YT_COOKIES }}" > /tmp/yt_cookies.txt
-            echo "COOKIE_FLAG=--cookies /tmp/yt_cookies.txt" >> $GITHUB_ENV
-            echo "✅ کوکی بارگذاری شد"
+          COOKIE_SECRET="${{ github.event.inputs.cookies_secret }}"
+          if [ -n "$COOKIE_SECRET" ]; then
+            echo "${{ secrets[github.event.inputs.cookies_secret] }}" > cookies.txt
+            echo "COOKIE_FILE=cookies.txt" >> $GITHUB_ENV
+            echo "✅ کوکی‌ها از Secret بارگذاری شدند"
           else
-            echo "COOKIE_FLAG=" >> $GITHUB_ENV
-            echo "⚠️ کوکی تنظیم نشده — برخی ویدیوها ممکن است دانلود نشوند"
+            echo "COOKIE_FILE=" >> $GITHUB_ENV
+            echo "⚠️ کوکی تنظیم نشده"
           fi
 
-      - name: 🎯 تنظیم فرمت دانلود بر اساس کیفیت
-        id: set_format
+      - name: 🎯 دانلود ویدیو با yt-dlp
         run: |
+          VIDEO_URL="${{ github.event.inputs.video_url }}"
+          FORMAT="${{ github.event.inputs.format }}"
           QUALITY="${{ github.event.inputs.quality }}"
+          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
+          COOKIE_FILE="${{ env.COOKIE_FILE }}"
+          EXTRA="${{ github.event.inputs.extra_options }}"
 
+          # ساخت نام پوشه
+          if [ -z "$OUTPUT_NAME" ]; then
+            FOLDER_NAME="youtube-$(date +%Y%m%d-%H%M%S)"
+          else
+            FOLDER_NAME="$OUTPUT_NAME"
+          fi
+          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
+          mkdir -p "videos/$FOLDER_NAME"
+
+          # تعیین فرمت خروجی
+          if [ "$FORMAT" = "mp3 (فقط صوت)" ]; then
+            FORMAT_FLAG="mp3"
+            AUDIO_FLAG="-x --audio-format mp3"
+            EXT="mp3"
+          else
+            FORMAT_FLAG="$FORMAT"
+            AUDIO_FLAG=""
+            EXT="$FORMAT"
+          fi
+
+          # انتخاب فرمت کیفیت
           case "$QUALITY" in
             best)
-              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-              SUBDIR="best"
+              FORMAT_SELECTOR="bestvideo*+bestaudio/best"
               ;;
             1080p)
-              FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]"
-              SUBDIR="1080p"
+              FORMAT_SELECTOR="bestvideo[height<=1080]+bestaudio/best[height<=1080]"
               ;;
             720p)
-              FORMAT="bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]"
-              SUBDIR="720p"
+              FORMAT_SELECTOR="bestvideo[height<=720]+bestaudio/best[height<=720]"
               ;;
             480p)
-              FORMAT="bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]"
-              SUBDIR="480p"
+              FORMAT_SELECTOR="bestvideo[height<=480]+bestaudio/best[height<=480]"
               ;;
             360p)
-              FORMAT="bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best[height<=360]"
-              SUBDIR="360p"
-              ;;
-            audio-only)
-              FORMAT="bestaudio/best"
-              SUBDIR="audio"
-              ;;
-            *)
-              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-              SUBDIR="best"
+              FORMAT_SELECTOR="bestvideo[height<=360]+bestaudio/best[height<=360]"
               ;;
           esac
 
-          echo "FORMAT=$FORMAT" >> $GITHUB_ENV
-          echo "SUBDIR=$SUBDIR" >> $GITHUB_ENV
-          echo "✅ فرمت انتخاب‌شده: $FORMAT"
-
-      - name: 📥 دانلود ویدیو با yt-dlp
-        id: download
-        run: |
-          URL="${{ github.event.inputs.video_url }}"
-          QUALITY="${{ github.event.inputs.quality }}"
-
-          mkdir -p tmp_download
-
-          # دریافت عنوان ویدیو — با Node.js runtime و کوکی
-          RAW_TITLE=$(yt-dlp \
-            --js-runtimes node \
-            ${{ env.COOKIE_FLAG }} \
-            --get-title \
-            "$URL" 2>/dev/null | head -1 || echo "untitled_video")
-
-          # پاک‌سازی کاراکترهای غیرمجاز از عنوان
-          SAFE_TITLE=$(echo "$RAW_TITLE" \
-            | sed 's/[\\/:*?"<>|]/_/g' \
-            | sed 's/  */ /g' \
-            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
-            | cut -c1-80)
-          if [ -z "$SAFE_TITLE" ]; then SAFE_TITLE="untitled_video"; fi
-
-          echo "SAFE_TITLE=$SAFE_TITLE" >> $GITHUB_ENV
-          echo "📌 عنوان ویدیو: $SAFE_TITLE"
-
-          # دانلود با Node.js runtime + کوکی
-          if [ "$QUALITY" = "audio-only" ]; then
-            yt-dlp \
-              --js-runtimes node \
-              ${{ env.COOKIE_FLAG }} \
-              -f "${{ env.FORMAT }}" \
-              --extract-audio \
-              --audio-format mp3 \
-              --audio-quality 0 \
-              --embed-thumbnail \
-              --add-metadata \
-              --restrict-filenames \
-              --no-playlist \
-              -o "tmp_download/%(title)s.%(ext)s" \
-              "$URL"
-          else
-            yt-dlp \
-              --js-runtimes node \
-              ${{ env.COOKIE_FLAG }} \
-              -f "${{ env.FORMAT }}" \
-              --merge-output-format mp4 \
-              --embed-thumbnail \
-              --add-metadata \
-              --restrict-filenames \
-              --no-playlist \
-              -o "tmp_download/%(title)s.%(ext)s" \
-              "$URL"
+          # دانلود
+          COOKIE_ARG=""
+          if [ -n "$COOKIE_FILE" ]; then
+            COOKIE_ARG="--cookies $COOKIE_FILE"
           fi
 
-          echo "✅ دانلود کامل شد:"
-          ls -lh tmp_download/
+          echo "📺 شروع دانلود: $VIDEO_URL"
+          yt-dlp \
+            -f "$FORMAT_SELECTOR" \
+            $AUDIO_FLAG \
+            -o "videos/$FOLDER_NAME/video.%(ext)s" \
+            --merge-output-format "$FORMAT_FLAG" \
+            $COOKIE_ARG \
+            $EXTRA \
+            "$VIDEO_URL"
 
-      - name: 🗜️ فشرده‌سازی و تقسیم
-        run: |
-          FINAL_DIR="downloads/youtube/${{ env.SUBDIR }}/${{ env.SAFE_TITLE }}"
-          mkdir -p "$FINAL_DIR"
-
-          # پاکسازی آرشیوهای قبلی در صورت وجود
-          rm -f "$FINAL_DIR"/*.7z*
-
-          if [ -z "${{ github.event.inputs.password }}" ]; then
-            7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" ./tmp_download/*
+          # در صورت دانلود فقط صوت، پسوند تغییر می‌کند
+          if [ "$FORMAT" = "mp3 (فقط صوت)" ]; then
+            if [ -f "videos/$FOLDER_NAME/video.mp3" ]; then
+              echo "🎵 فایل صوتی با موفقیت ذخیره شد"
+            else
+              echo "⚠️ فایل صوتی یافت نشد"
+            fi
           else
-            7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" ./tmp_download/*
+            echo "🎬 ویدیو در پوشه videos/$FOLDER_NAME ذخیره شد"
           fi
-
-          echo "✅ فایل فشرده در $FINAL_DIR ذخیره شد:"
-          ls -lh "$FINAL_DIR"
 
       - name: 🧹 پاکسازی فایل‌های موقت
         run: |
-          rm -rf tmp_download
-          rm -f /tmp/yt_cookies.txt
+          rm -f cookies.txt
 
       - name: 📝 کامیت و پوش به مخزن
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/
-          git commit -m "Add YouTube video: ${{ env.SAFE_TITLE }} (quality: ${{ github.event.inputs.quality }})" || echo "Nothing to commit"
+          git add videos/
+          git commit -m "🎬 Add YouTube video from ${{ github.event.inputs.video_url }} → videos/${{ env.FOLDER_NAME }}" || echo "Nothing to commit"
           git push

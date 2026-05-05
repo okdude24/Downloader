@@ -1,53 +1,31 @@
-name: '📸 اسکرین‌شات از وب‌سایت و ذخیره در مخزن'
+name: '🎬 دانلود ویدیو یوتیوب و ذخیره در مخزن'
 
 on:
   workflow_dispatch:
     inputs:
-      website_url:
-        description: '🌐 آدرس کامل وب‌سایت (با http:// یا https://)'
+      video_url:
+        description: '🔗 لینک ویدیو یوتیوب'
         required: true
         type: string
-      viewport_width:
-        description: '📏 عرض صفحه (پیکسل)'
-        required: false
-        type: string
-        default: '1280'
-      viewport_height:
-        description: '📐 ارتفاع صفحه (پیکسل)'
-        required: false
-        type: string
-        default: '800'
-      full_page:
-        description: '🗂️ اسکرین‌شات تمام‌صفحه'
-        required: false
-        type: boolean
-        default: true
-      format:
-        description: '🖼️ فرمت تصویر خروجی'
+      quality:
+        description: '🎞️ کیفیت ویدیو'
         required: false
         type: choice
-        default: 'png'
+        default: 'best'
         options:
-          - png
-          - jpeg
-          - webp
-      quality:
-        description: '🎚️ کیفیت تصویر (فقط برای jpeg و webp، عدد بین ۱ تا ۱۰۰)'
+          - best
+          - 1080p
+          - 720p
+          - 480p
+          - 360p
+          - audio-only
+      split_size:
+        description: '📦 حجم هر تکه (پیش‌فرض: 95m) مثال: 95m, 100m, 200m'
         required: false
         type: string
-        default: '90'
-      delay:
-        description: '⏳ تاخیر قبل از اسکرین‌شات (ثانیه)'
-        required: false
-        type: string
-        default: '2'
-      output_name:
-        description: '📁 نام پوشه/فایل (اختیاری، در غیر این صورت از دامنه استفاده می‌شود)'
-        required: false
-        type: string
-        default: ''
-      cookies_secret:
-        description: '🍪 نام Secret حاوی کوکی‌ها (اختیاری، مثلاً COOKIES_JSON)'
+        default: '95m'
+      password:
+        description: '🔐 رمز فایل فشرده (اختیاری)'
         required: false
         type: string
         default: ''
@@ -56,113 +34,160 @@ permissions:
   contents: write
 
 jobs:
-  screenshot-and-commit:
+  download-and-commit:
     runs-on: ubuntu-latest
 
     steps:
       - name: 🔄 دریافت کد مخزن
         uses: actions/checkout@v4
 
-      - name: ⚙️ نصب Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 🎭 نصب Playwright و مرورگر Chromium
+      - name: ⚙️ نصب ابزارها
         run: |
-          npm init -y
-          npm install playwright
-          npx playwright install --with-deps chromium
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full ffmpeg
+          # نصب آخرین نسخه yt-dlp مستقیم از GitHub (پایدارتر از pip)
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+          yt-dlp --version
+          # تأیید وجود Node.js (runtime برای یوتیوب)
+          node --version
 
-      - name: 🍪 بارگذاری کوکی (در صورت وجود)
+      - name: 🍪 بارگذاری کوکی از Secret
         run: |
-          COOKIE_SECRET="${{ github.event.inputs.cookies_secret }}"
-          if [ -n "$COOKIE_SECRET" ]; then
-            echo "${{ secrets[github.event.inputs.cookies_secret] }}" > cookies.json
-            echo "COOKIE_FILE=cookies.json" >> $GITHUB_ENV
-            echo "✅ کوکی‌ها از Secret بارگذاری شدند"
+          # اگر Secret با نام YT_COOKIES تنظیم شده باشد، در فایل موقت ذخیره می‌شود
+          if [ -n "${{ secrets.YT_COOKIES }}" ]; then
+            echo "${{ secrets.YT_COOKIES }}" > /tmp/yt_cookies.txt
+            echo "COOKIE_FLAG=--cookies /tmp/yt_cookies.txt" >> $GITHUB_ENV
+            echo "✅ کوکی بارگذاری شد"
           else
-            echo "COOKIE_FILE=" >> $GITHUB_ENV
-            echo "⚠️ کوکی تنظیم نشده — در صورت نیاز به لاگین ممکن است اسکرین‌شات درست نباشد"
+            echo "COOKIE_FLAG=" >> $GITHUB_ENV
+            echo "⚠️ کوکی تنظیم نشده — برخی ویدیوها ممکن است دانلود نشوند"
           fi
 
-      - name: 📥 گرفتن اسکرین‌شات با Playwright
-        id: screenshot
+      - name: 🎯 تنظیم فرمت دانلود بر اساس کیفیت
+        id: set_format
         run: |
-          WEBSITE_URL="${{ github.event.inputs.website_url }}"
-          FORMAT="${{ github.event.inputs.format }}"
           QUALITY="${{ github.event.inputs.quality }}"
-          DELAY="${{ github.event.inputs.delay }}"
-          WIDTH="${{ github.event.inputs.viewport_width }}"
-          HEIGHT="${{ github.event.inputs.viewport_height }}"
-          FULL_PAGE="${{ github.event.inputs.full_page }}"
-          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
 
-          # ساخت نام پوشه از دامنه یا نام دلخواه
-          if [ -z "$OUTPUT_NAME" ]; then
-            DOMAIN=$(echo "$WEBSITE_URL" | awk -F/ '{print $3}' | sed 's/[^a-zA-Z0-9._-]/_/g')
-            FOLDER_NAME="$DOMAIN-$(date +%Y%m%d-%H%M%S)"
+          case "$QUALITY" in
+            best)
+              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+              SUBDIR="best"
+              ;;
+            1080p)
+              FORMAT="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]"
+              SUBDIR="1080p"
+              ;;
+            720p)
+              FORMAT="bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]"
+              SUBDIR="720p"
+              ;;
+            480p)
+              FORMAT="bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=480]+bestaudio/best[height<=480]"
+              SUBDIR="480p"
+              ;;
+            360p)
+              FORMAT="bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=360]+bestaudio/best[height<=360]"
+              SUBDIR="360p"
+              ;;
+            audio-only)
+              FORMAT="bestaudio/best"
+              SUBDIR="audio"
+              ;;
+            *)
+              FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+              SUBDIR="best"
+              ;;
+          esac
+
+          echo "FORMAT=$FORMAT" >> $GITHUB_ENV
+          echo "SUBDIR=$SUBDIR" >> $GITHUB_ENV
+          echo "✅ فرمت انتخاب‌شده: $FORMAT"
+
+      - name: 📥 دانلود ویدیو با yt-dlp
+        id: download
+        run: |
+          URL="${{ github.event.inputs.video_url }}"
+          QUALITY="${{ github.event.inputs.quality }}"
+
+          mkdir -p tmp_download
+
+          # دریافت عنوان ویدیو — با Node.js runtime و کوکی
+          RAW_TITLE=$(yt-dlp \
+            --js-runtimes node \
+            ${{ env.COOKIE_FLAG }} \
+            --get-title \
+            "$URL" 2>/dev/null | head -1 || echo "untitled_video")
+
+          # پاک‌سازی کاراکترهای غیرمجاز از عنوان
+          SAFE_TITLE=$(echo "$RAW_TITLE" \
+            | sed 's/[\\/:*?"<>|]/_/g' \
+            | sed 's/  */ /g' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | cut -c1-80)
+          if [ -z "$SAFE_TITLE" ]; then SAFE_TITLE="untitled_video"; fi
+
+          echo "SAFE_TITLE=$SAFE_TITLE" >> $GITHUB_ENV
+          echo "📌 عنوان ویدیو: $SAFE_TITLE"
+
+          # دانلود با Node.js runtime + کوکی
+          if [ "$QUALITY" = "audio-only" ]; then
+            yt-dlp \
+              --js-runtimes node \
+              ${{ env.COOKIE_FLAG }} \
+              -f "${{ env.FORMAT }}" \
+              --extract-audio \
+              --audio-format mp3 \
+              --audio-quality 0 \
+              --embed-thumbnail \
+              --add-metadata \
+              --restrict-filenames \
+              --no-playlist \
+              -o "tmp_download/%(title)s.%(ext)s" \
+              "$URL"
           else
-            FOLDER_NAME="$OUTPUT_NAME"
+            yt-dlp \
+              --js-runtimes node \
+              ${{ env.COOKIE_FLAG }} \
+              -f "${{ env.FORMAT }}" \
+              --merge-output-format mp4 \
+              --embed-thumbnail \
+              --add-metadata \
+              --restrict-filenames \
+              --no-playlist \
+              -o "tmp_download/%(title)s.%(ext)s" \
+              "$URL"
           fi
 
-          echo "FOLDER_NAME=$FOLDER_NAME" >> $GITHUB_ENV
-          echo "📌 پوشه مقصد: screenshots/$FOLDER_NAME"
+          echo "✅ دانلود کامل شد:"
+          ls -lh tmp_download/
 
-          mkdir -p "screenshots/$FOLDER_NAME"
+      - name: 🗜️ فشرده‌سازی و تقسیم
+        run: |
+          FINAL_DIR="downloads/youtube/${{ env.SUBDIR }}/${{ env.SAFE_TITLE }}"
+          mkdir -p "$FINAL_DIR"
 
-          # ذخیرهٔ کوکی‌ها در صورت وجود
-          if [ -n "${{ env.COOKIE_FILE }}" ]; then
-            COOKIE_PARAM="--cookies-file=${{ env.COOKIE_FILE }}"
+          # پاکسازی آرشیوهای قبلی در صورت وجود
+          rm -f "$FINAL_DIR"/*.7z*
+
+          if [ -z "${{ github.event.inputs.password }}" ]; then
+            7z a -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" ./tmp_download/*
           else
-            COOKIE_PARAM=""
+            7z a -p"${{ github.event.inputs.password }}" -mhe=on -mx=3 -v${{ github.event.inputs.split_size }} "$FINAL_DIR/archive.7z" ./tmp_download/*
           fi
 
-          # اجرای اسکریپت Node.js
-          node -e "
-          const { chromium } = require('playwright');
-          (async () => {
-            const browser = await chromium.launch();
-            const context = await browser.newContext({
-              viewport: { width: parseInt('$WIDTH'), height: parseInt('$HEIGHT') }
-            });
-            const page = await context.newPage();
-
-            // بارگذاری کوکی‌ها در صورت وجود فایل
-            if ('$COOKIE_FILE') {
-              const fs = require('fs');
-              if (fs.existsSync('$COOKIE_FILE')) {
-                const cookies = JSON.parse(fs.readFileSync('$COOKIE_FILE', 'utf-8'));
-                await context.addCookies(cookies);
-                console.log('🍪 کوکی‌ها بارگذاری شدند');
-              }
-            }
-
-            await page.goto('$WEBSITE_URL', { waitUntil: 'networkidle' });
-            await page.waitForTimeout(parseInt('$DELAY') * 1000);
-            const screenshotOptions = {
-              path: 'screenshots/$FOLDER_NAME/screenshot.$FORMAT',
-              type: '$FORMAT',
-              fullPage: '$FULL_PAGE' === 'true'
-            };
-            if ('$FORMAT' === 'jpeg' || '$FORMAT' === 'webp') {
-              screenshotOptions.quality = parseInt('$QUALITY');
-            }
-            await page.screenshot(screenshotOptions);
-            console.log('✅ اسکرین‌شات ذخیره شد');
-            await browser.close();
-          })();
-          "
+          echo "✅ فایل فشرده در $FINAL_DIR ذخیره شد:"
+          ls -lh "$FINAL_DIR"
 
       - name: 🧹 پاکسازی فایل‌های موقت
         run: |
-          rm -f cookies.json package.json package-lock.json
-          rm -rf node_modules
+          rm -rf tmp_download
+          rm -f /tmp/yt_cookies.txt
 
       - name: 📝 کامیت و پوش به مخزن
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add screenshots/
-          git commit -m "📸 Add screenshot of $WEBSITE_URL → screenshots/$FOLDER_NAME" || echo "Nothing to commit"
+          git add downloads/
+          git commit -m "Add YouTube video: ${{ env.SAFE_TITLE }} (quality: ${{ github.event.inputs.quality }})" || echo "Nothing to commit"
           git push
